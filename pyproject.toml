@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "risk-aware-convoy-escort-allocation-milp"
-version = "0.3.0"
-description = "Synthetic deterministic, stochastic, and robust MILP models for risk-aware convoy escort allocation."
+version = "0.4.0"
+description = "Synthetic deterministic, stochastic, robust, and CVaR-aware MILP models for risk-aware convoy escort allocation."
 readme = "README.md"
 requires-python = ">=3.10"
 license = {file = "LICENSE"}
-keywords = ["operations-research", "milp", "optimization", "resource-allocation", "stochastic-programming", "robust-optimization", "pulp"]
+keywords = ["operations-research", "milp", "optimization", "resource-allocation", "stochastic-programming", "robust-optimization", "cvar", "tail-risk", "pulp"]
 dependencies = [
   "pulp>=2.8,<4",
 ]
