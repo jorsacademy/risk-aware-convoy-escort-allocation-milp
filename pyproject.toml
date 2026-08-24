@@ -4,10 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "risk-aware-convoy-escort-allocation-milp"
-version = "0.1.0"
+version = "0.2.0"
 description = "A synthetic MILP example for risk-aware convoy escort allocation with diminishing returns."
 readme = "README.md"
 requires-python = ">=3.10"
+license = {file = "LICENSE"}
+keywords = ["operations-research", "milp", "optimization", "resource-allocation", "pulp"]
 dependencies = [
   "pulp>=2.8,<4",
 ]
