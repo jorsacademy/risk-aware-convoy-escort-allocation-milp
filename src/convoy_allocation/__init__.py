@@ -1,5 +1,6 @@
 """Risk-aware convoy escort allocation package."""
 
+from .dro import DROAllocationResult, solve_dro_allocation
 from .model import AllocationResult, Convoy, Escort, solve_allocation
 from .uncertainty import (
     CVaRAllocationResult,
@@ -14,11 +15,13 @@ __all__ = [
     "AllocationResult",
     "CVaRAllocationResult",
     "Convoy",
+    "DROAllocationResult",
     "Escort",
     "ScenarioOutcome",
     "ThreatScenario",
     "UncertainAllocationResult",
     "solve_allocation",
     "solve_cvar_allocation",
+    "solve_dro_allocation",
     "solve_uncertain_allocation",
 ]
