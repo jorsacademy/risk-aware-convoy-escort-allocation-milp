@@ -1,13 +1,25 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Mapping, Sequence
 
-from pulp import LpBinary, LpMaximize, LpProblem, LpStatus, LpVariable, PULP_CBC_CMD, lpSum, value
+from pulp import (
+    LpBinary,
+    LpMaximize,
+    LpProblem,
+    LpStatus,
+    LpVariable,
+    PULP_CBC_CMD,
+    lpSum,
+    value,
+)
 
 
 @dataclass(frozen=True)
 class Convoy:
+    """Synthetic convoy input data."""
+
     ships: int
     threat: float
     baseline_survival: float
@@ -17,6 +29,8 @@ class Convoy:
 
 @dataclass(frozen=True)
 class Escort:
+    """Synthetic escort input data."""
+
     protection: float
 
 
@@ -56,6 +70,10 @@ class AllocationResult:
         return self.expected_survivors / self.total_ships
 
 
+def _is_finite(value_: float) -> bool:
+    return math.isfinite(float(value_))
+
+
 def _validate_inputs(
     convoys: Mapping[str, Convoy],
     escorts: Mapping[str, Escort],
@@ -66,35 +84,65 @@ def _validate_inputs(
         raise ValueError("At least one convoy is required.")
     if not escorts:
         raise ValueError("At least one escort is required.")
+    if not isinstance(max_available_escorts, int) or isinstance(max_available_escorts, bool):
+        raise TypeError("max_available_escorts must be an integer.")
     if max_available_escorts < 0:
         raise ValueError("max_available_escorts must be non-negative.")
     if max_available_escorts > len(escorts):
         raise ValueError("max_available_escorts cannot exceed the number of escorts.")
     if not diminishing_returns:
         raise ValueError("diminishing_returns must contain at least one value.")
+    if any(not _is_finite(value_) for value_ in diminishing_returns):
+        raise ValueError("diminishing_returns values must be finite.")
     if any(value_ <= 0 for value_ in diminishing_returns):
         raise ValueError("diminishing_returns values must be positive.")
     if any(a < b for a, b in zip(diminishing_returns, diminishing_returns[1:])):
         raise ValueError("diminishing_returns must be non-increasing.")
 
+    max_slots = min(max_available_escorts, len(diminishing_returns), len(escorts))
+    minimum_required = 0
+
     for convoy_id, convoy in convoys.items():
+        if not convoy_id:
+            raise ValueError("Convoy identifiers must be non-empty strings.")
+        if not isinstance(convoy.ships, int) or isinstance(convoy.ships, bool):
+            raise TypeError(f"Convoy {convoy_id} ships must be an integer.")
         if convoy.ships <= 0:
             raise ValueError(f"Convoy {convoy_id} must contain at least one ship.")
-        if convoy.threat <= 0:
-            raise ValueError(f"Convoy {convoy_id} threat must be positive.")
+        if not _is_finite(convoy.threat) or convoy.threat <= 0:
+            raise ValueError(f"Convoy {convoy_id} threat must be finite and positive.")
+        if not _is_finite(convoy.baseline_survival):
+            raise ValueError(f"Convoy {convoy_id} baseline_survival must be finite.")
         if not 0 <= convoy.baseline_survival <= 1:
             raise ValueError(f"Convoy {convoy_id} baseline_survival must be in [0, 1].")
+        if not isinstance(convoy.min_escorts, int) or isinstance(convoy.min_escorts, bool):
+            raise TypeError(f"Convoy {convoy_id} min_escorts must be an integer.")
         if convoy.min_escorts < 0:
             raise ValueError(f"Convoy {convoy_id} min_escorts must be non-negative.")
+
         upper = len(escorts) if convoy.max_escorts is None else convoy.max_escorts
+        if not isinstance(upper, int) or isinstance(upper, bool):
+            raise TypeError(f"Convoy {convoy_id} max_escorts must be an integer or None.")
         if upper < 0:
             raise ValueError(f"Convoy {convoy_id} max_escorts must be non-negative.")
         if convoy.min_escorts > upper:
             raise ValueError(f"Convoy {convoy_id} min_escorts cannot exceed max_escorts.")
+        if convoy.min_escorts > max_slots:
+            raise ValueError(
+                f"Convoy {convoy_id} min_escorts exceeds the number of modeled escort slots."
+            )
+        minimum_required += convoy.min_escorts
+
+    if minimum_required > max_available_escorts:
+        raise ValueError(
+            "The sum of convoy minimum escort requirements exceeds max_available_escorts."
+        )
 
     for escort_id, escort in escorts.items():
-        if escort.protection <= 0:
-            raise ValueError(f"Escort {escort_id} protection must be positive.")
+        if not escort_id:
+            raise ValueError("Escort identifiers must be non-empty strings.")
+        if not _is_finite(escort.protection) or escort.protection <= 0:
+            raise ValueError(f"Escort {escort_id} protection must be finite and positive.")
 
 
 def _marginal_gain(
@@ -103,8 +151,24 @@ def _marginal_gain(
     return_factor: float,
     effectiveness_scale: float,
 ) -> float:
-    raw_gain = effectiveness_scale * escort_protection * return_factor / convoy.threat
-    return max(0.0, raw_gain)
+    return effectiveness_scale * escort_protection * return_factor / convoy.threat
+
+
+def _gain_coefficient(
+    convoy: Convoy,
+    escort: Escort,
+    return_factor: float,
+    effectiveness_scale: float,
+) -> float:
+    """Return the linear survival-probability coefficient for one escort-slot pair."""
+    remaining_probability = 1.0 - convoy.baseline_survival
+    raw_gain = _marginal_gain(
+        convoy,
+        escort.protection,
+        return_factor,
+        effectiveness_scale,
+    )
+    return min(raw_gain, remaining_probability)
 
 
 def solve_allocation(
@@ -117,13 +181,17 @@ def solve_allocation(
 ) -> AllocationResult:
     """Solve the risk-aware escort allocation MILP.
 
-    The optimization and the reported expected-survival metrics use the same
-    mathematical formulation. Each additional escort occupies an ordered slot
-    with a smaller marginal effectiveness factor.
+    Each escort can be assigned to at most one convoy. Within a convoy, assigned
+    escorts occupy ordered marginal-effect slots. Earlier slots have larger
+    return factors, which creates diminishing returns while preserving a linear
+    mixed-integer formulation.
+
+    The exact same linear survival coefficients are used in the objective,
+    feasibility constraints, and reported results.
     """
     _validate_inputs(convoys, escorts, max_available_escorts, diminishing_returns)
-    if effectiveness_scale <= 0:
-        raise ValueError("effectiveness_scale must be positive.")
+    if not _is_finite(effectiveness_scale) or effectiveness_scale <= 0:
+        raise ValueError("effectiveness_scale must be finite and positive.")
 
     convoy_ids = tuple(convoys)
     escort_ids = tuple(escorts)
@@ -138,7 +206,6 @@ def solve_allocation(
         for convoy_id in convoy_ids
         for escort_id in escort_ids
     }
-
     z = {
         (convoy_id, escort_id, slot): LpVariable(
             f"slot_{convoy_id}_{escort_id}_{slot}", cat=LpBinary
@@ -147,7 +214,6 @@ def solve_allocation(
         for escort_id in escort_ids
         for slot in range(max_slots)
     }
-
     slot_used = {
         (convoy_id, slot): LpVariable(
             f"slot_used_{convoy_id}_{slot}", cat=LpBinary
@@ -161,25 +227,26 @@ def solve_allocation(
         for convoy_id in convoy_ids
     )
 
-    marginal_objective_terms = []
-    for convoy_id in convoy_ids:
-        convoy = convoys[convoy_id]
-        remaining_probability = 1.0 - convoy.baseline_survival
-        for slot in range(max_slots):
-            factor = diminishing_returns[slot]
-            for escort_id in escort_ids:
-                gain = _marginal_gain(
-                    convoy,
-                    escorts[escort_id].protection,
-                    factor,
-                    effectiveness_scale,
-                )
-                capped_gain = min(gain, remaining_probability)
-                marginal_objective_terms.append(
-                    convoy.ships * capped_gain * z[convoy_id, escort_id, slot]
-                )
+    gain = {
+        (convoy_id, escort_id, slot): _gain_coefficient(
+            convoys[convoy_id],
+            escorts[escort_id],
+            diminishing_returns[slot],
+            effectiveness_scale,
+        )
+        for convoy_id in convoy_ids
+        for escort_id in escort_ids
+        for slot in range(max_slots)
+    }
 
-    model += baseline_expected_survivors + lpSum(marginal_objective_terms)
+    model += baseline_expected_survivors + lpSum(
+        convoys[convoy_id].ships
+        * gain[convoy_id, escort_id, slot]
+        * z[convoy_id, escort_id, slot]
+        for convoy_id in convoy_ids
+        for escort_id in escort_ids
+        for slot in range(max_slots)
+    )
 
     for escort_id in escort_ids:
         model += lpSum(x[convoy_id, escort_id] for convoy_id in convoy_ids) <= 1
@@ -190,12 +257,14 @@ def solve_allocation(
         convoy = convoys[convoy_id]
         max_for_convoy = len(escort_ids) if convoy.max_escorts is None else convoy.max_escorts
         max_for_convoy = min(max_for_convoy, max_slots)
-
         assigned_count = lpSum(x[convoy_id, escort_id] for escort_id in escort_ids)
+
         model += assigned_count >= convoy.min_escorts
         model += assigned_count <= max_for_convoy
-
-        model += lpSum(slot_used[convoy_id, slot] for slot in range(max_slots)) == assigned_count
+        model += (
+            lpSum(slot_used[convoy_id, slot] for slot in range(max_slots))
+            == assigned_count
+        )
 
         for slot in range(max_slots):
             model += (
@@ -212,21 +281,15 @@ def solve_allocation(
                 == x[convoy_id, escort_id]
             )
 
-        survival_gain = lpSum(
-            min(
-                _marginal_gain(
-                    convoy,
-                    escorts[escort_id].protection,
-                    diminishing_returns[slot],
-                    effectiveness_scale,
-                ),
-                1.0 - convoy.baseline_survival,
+        model += (
+            lpSum(
+                gain[convoy_id, escort_id, slot]
+                * z[convoy_id, escort_id, slot]
+                for escort_id in escort_ids
+                for slot in range(max_slots)
             )
-            * z[convoy_id, escort_id, slot]
-            for escort_id in escort_ids
-            for slot in range(max_slots)
+            <= 1.0 - convoy.baseline_survival
         )
-        model += survival_gain <= 1.0 - convoy.baseline_survival
 
     model.solve(PULP_CBC_CMD(msg=False))
     status = LpStatus[model.status]
@@ -242,18 +305,13 @@ def solve_allocation(
             if (x[convoy_id, escort_id].value() or 0.0) > 0.5
         )
 
-        survival_probability = convoy.baseline_survival
-        for escort_id in escort_ids:
-            for slot in range(max_slots):
-                if (z[convoy_id, escort_id, slot].value() or 0.0) > 0.5:
-                    gain = _marginal_gain(
-                        convoy,
-                        escorts[escort_id].protection,
-                        diminishing_returns[slot],
-                        effectiveness_scale,
-                    )
-                    survival_probability += gain
-
+        optimized_gain = sum(
+            gain[convoy_id, escort_id, slot]
+            for escort_id in escort_ids
+            for slot in range(max_slots)
+            if (z[convoy_id, escort_id, slot].value() or 0.0) > 0.5
+        )
+        survival_probability = convoy.baseline_survival + optimized_gain
         survival_probability = min(1.0, max(0.0, survival_probability))
         expected_survivors = convoy.ships * survival_probability
         expected_losses = convoy.ships - expected_survivors
