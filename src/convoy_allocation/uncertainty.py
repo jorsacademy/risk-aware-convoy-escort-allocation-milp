@@ -266,15 +266,18 @@ def _extract_outcomes(
     scenario_ids: Sequence[str],
 ) -> tuple[ScenarioOutcome, ...]:
     total_ships = sum(convoy.ships for convoy in convoys.values())
-    return tuple(
-        ScenarioOutcome(
-            scenario_id=s,
-            probability=scenarios[s].probability,
-            expected_survivors=float(value(scenario_totals[s])),
-            survival_rate=float(value(scenario_totals[s])) / total_ships,
+    outcomes = []
+    for s in scenario_ids:
+        realized = float(value(scenario_totals[s]))
+        outcomes.append(
+            ScenarioOutcome(
+                scenario_id=s,
+                probability=scenarios[s].probability,
+                expected_survivors=realized,
+                survival_rate=realized / total_ships,
+            )
         )
-        for s in scenario_ids
-    )
+    return tuple(outcomes)
 
 
 def _lower_tail_cvar(outcomes: Sequence[ScenarioOutcome], alpha: float) -> float:
@@ -359,10 +362,16 @@ def solve_uncertain_allocation(
         for c in convoy_ids
     }
     outcomes = _extract_outcomes(convoys, scenarios, scenario_totals, scenario_ids)
+    expected_survivors = sum(item.probability * item.expected_survivors for item in outcomes)
+    worst_case_survivors = min(item.expected_survivors for item in outcomes)
+    reported_objective = (
+        (1.0 - risk_aversion) * expected_survivors
+        + risk_aversion * worst_case_survivors
+    )
 
     return UncertainAllocationResult(
         status=status,
-        objective_value=float(value(model.objective)),
+        objective_value=reported_objective,
         risk_aversion=risk_aversion,
         assigned_escorts=assigned,
         scenarios=outcomes,
@@ -436,10 +445,16 @@ def solve_cvar_allocation(
         for c in convoy_ids
     }
     outcomes = _extract_outcomes(convoys, scenarios, scenario_totals, scenario_ids)
+    expected_survivors = sum(item.probability * item.expected_survivors for item in outcomes)
+    cvar_survivors = _lower_tail_cvar(outcomes, cvar_alpha)
+    reported_objective = (
+        (1.0 - cvar_weight) * expected_survivors
+        + cvar_weight * cvar_survivors
+    )
 
     return CVaRAllocationResult(
         status=status,
-        objective_value=float(value(model.objective)),
+        objective_value=reported_objective,
         cvar_alpha=cvar_alpha,
         cvar_weight=cvar_weight,
         assigned_escorts=assigned,
