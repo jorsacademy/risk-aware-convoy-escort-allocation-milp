@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "risk-aware-convoy-escort-allocation-milp"
+version = "0.1.0"
+description = "A synthetic MILP example for risk-aware convoy escort allocation with diminishing returns."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "pulp>=2.8,<4",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8,<9",
+]
+
+[project.scripts]
+convoy-allocation = "convoy_allocation.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
