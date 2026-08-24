@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "risk-aware-convoy-escort-allocation-milp"
-version = "0.2.0"
-description = "A synthetic MILP example for risk-aware convoy escort allocation with diminishing returns."
+version = "0.3.0"
+description = "Synthetic deterministic, stochastic, and robust MILP models for risk-aware convoy escort allocation."
 readme = "README.md"
 requires-python = ">=3.10"
 license = {file = "LICENSE"}
-keywords = ["operations-research", "milp", "optimization", "resource-allocation", "pulp"]
+keywords = ["operations-research", "milp", "optimization", "resource-allocation", "stochastic-programming", "robust-optimization", "pulp"]
 dependencies = [
   "pulp>=2.8,<4",
 ]
@@ -21,6 +21,7 @@ dev = [
 
 [project.scripts]
 convoy-allocation = "convoy_allocation.cli:main"
+convoy-allocation-uncertain = "convoy_allocation.uncertainty_cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
