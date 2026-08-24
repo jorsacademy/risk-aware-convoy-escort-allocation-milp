@@ -1,12 +1,22 @@
 # Risk-Aware Convoy Escort Allocation MILP
 
-A compact mixed-integer linear programming model for allocating a limited set of escort resources across multiple synthetic convoys under heterogeneous risk and diminishing marginal returns.
+A compact operations-research project for allocating a limited set of escort resources across multiple synthetic convoys under heterogeneous risk, diminishing marginal returns, and uncertain threat conditions.
 
-The repository is intentionally synthetic. All convoy identifiers, escort identifiers, parameters, and scenario values are fictional and are provided only to demonstrate optimization modeling techniques.
+The repository is intentionally synthetic. All convoy identifiers, escort identifiers, parameters, scenarios, and numerical values are fictional and are provided only to demonstrate optimization modeling techniques.
 
-## What the model does
+## Models included
 
-A planner must assign a limited number of escorts to convoys. Each convoy has:
+The repository now contains three closely related formulations:
+
+1. **Deterministic MILP** — assumes each convoy threat score is known.
+2. **Risk-neutral stochastic MILP** — selects one allocation before a finite threat scenario is observed and maximizes probability-weighted expected survivors.
+3. **Finite-scenario robust MILP** — selects one allocation that maximizes the worst scenario outcome among the supplied scenarios.
+
+A continuous `risk_aversion` parameter also allows intermediate solutions between the stochastic expected-value objective and the robust maximin objective.
+
+## Deterministic model
+
+A planner assigns a limited number of escorts to convoys. Each convoy has:
 
 - a ship count,
 - a baseline survival probability,
@@ -14,23 +24,6 @@ A planner must assign a limited number of escorts to convoys. Each convoy has:
 - optional minimum and maximum escort requirements.
 
 Each escort has a protection score. Escort effectiveness is adjusted by convoy threat and by an ordered diminishing-return schedule. The model maximizes total expected surviving ships while respecting resource and assignment constraints.
-
-## Why this version is stronger than a naive allocation model
-
-A naive linear formulation can accidentally optimize one expression and then report outcomes using a different expression. It can also value the first and fifth escort identically, which encourages unrealistic resource concentration.
-
-This implementation avoids those issues by:
-
-- using one shared survival-gain coefficient table in the objective, feasibility constraints, and result reconstruction,
-- representing heterogeneous escorts explicitly,
-- introducing ordered escort-effect slots for diminishing marginal returns,
-- preventing survival probability from exceeding `1.0`,
-- validating resource limits and aggregate minimum requirements before solving,
-- rejecting non-finite and invalid numeric inputs,
-- checking solver status before results are returned,
-- covering core invariants with automated tests.
-
-## Optimization structure
 
 The principal binary variables are:
 
@@ -42,36 +35,76 @@ For convoy `c`, escort `e`, and slot `k`, the synthetic survival increment is ba
 
 `effectiveness_scale * protection[e] * return_factor[k] / threat[c]`
 
-The coefficient is capped by the convoy's remaining probability mass. A convoy-level linear constraint then ensures the sum of selected increments cannot push survival probability above one.
+The coefficient is capped by the convoy's remaining probability mass, and a convoy-level linear constraint ensures modeled survival probability cannot exceed one.
 
-The objective is:
+See [`docs/formulation.md`](docs/formulation.md) for the deterministic formulation.
 
-`maximize total expected surviving ships`
+## Uncertainty-aware model
 
-subject to:
+The uncertainty extension introduces a finite scenario set. Each scenario has:
 
-- each escort is assigned to at most one convoy,
-- total assignments do not exceed the available resource limit,
-- convoy minimum and maximum escort requirements are respected,
-- each assigned escort occupies exactly one marginal-effect slot,
-- each active slot contains exactly one escort,
-- later slots cannot activate before earlier slots,
-- modeled survival probability remains in `[0, 1]`.
+- a probability,
+- one positive threat multiplier for every convoy.
 
-See [`docs/formulation.md`](docs/formulation.md) for the complete mathematical formulation.
+Escort assignments are **here-and-now decisions**: the same assignment must be used in every scenario. Scenario-dependent threat multipliers change the survival contribution of each selected escort-slot pair.
+
+If `Q[s]` denotes total expected survivors under scenario `s`, then the risk-neutral model maximizes:
+
+`sum_s probability[s] * Q[s]`
+
+For robust optimization, a variable `eta` is constrained by:
+
+`eta <= Q[s]` for every scenario `s`
+
+so that maximizing `eta` maximizes the worst supplied scenario outcome.
+
+The implemented risk-adjusted objective is:
+
+`(1 - alpha) * expected_survivors + alpha * worst_case_survivors`
+
+where `alpha = risk_aversion`.
+
+- `alpha = 0.0`: risk-neutral stochastic allocation,
+- `0.0 < alpha < 1.0`: expected/worst-case compromise,
+- `alpha = 1.0`: finite-scenario maximin robust allocation.
+
+See [`docs/uncertainty.md`](docs/uncertainty.md) for the full uncertainty formulation and interpretation limits.
+
+## Why this formulation is stronger than a naive allocation model
+
+A naive formulation can accidentally optimize one expression and then report outcomes using a different expression. It can also value every additional escort identically, encourage unrealistic resource concentration, or ignore uncertainty entirely.
+
+This project addresses those problems by:
+
+- using the same survival-gain coefficients in the objective, feasibility constraints, and result reconstruction,
+- representing heterogeneous escorts explicitly,
+- introducing ordered marginal-effect slots for diminishing returns,
+- preventing survival probability from exceeding `1.0`,
+- validating resource limits and aggregate minimum requirements before solving,
+- rejecting non-finite and invalid numeric inputs,
+- checking solver status before results are returned,
+- supporting finite threat scenarios with explicit probabilities,
+- supporting both expected-value and worst-case optimization,
+- covering deterministic and uncertainty-aware invariants with automated tests.
 
 ## Repository layout
 
 ```text
 .
 ├── .github/workflows/ci.yml
-├── docs/formulation.md
+├── docs/
+│   ├── formulation.md
+│   └── uncertainty.md
 ├── src/convoy_allocation/
 │   ├── __init__.py
 │   ├── cli.py
 │   ├── model.py
-│   └── scenario.py
-├── tests/test_model.py
+│   ├── scenario.py
+│   ├── uncertainty.py
+│   └── uncertainty_cli.py
+├── tests/
+│   ├── test_model.py
+│   └── test_uncertainty.py
 ├── LICENSE
 ├── README.md
 └── pyproject.toml
@@ -95,7 +128,7 @@ python -m venv .venv
 python -m pip install -e .
 ```
 
-## Run the demonstration
+## Run the deterministic demonstration
 
 ```bash
 convoy-allocation
@@ -107,6 +140,44 @@ or:
 python -m convoy_allocation.cli
 ```
 
+## Run the uncertainty demonstration
+
+```bash
+convoy-allocation-uncertain
+```
+
+or:
+
+```bash
+python -m convoy_allocation.uncertainty_cli
+```
+
+The uncertainty demonstration solves both a risk-neutral stochastic model and a fully risk-averse maximin model using the same synthetic scenario set.
+
+## Python API example
+
+```python
+from convoy_allocation.scenario import (
+    build_demo_scenario,
+    build_uncertain_demo_scenarios,
+)
+from convoy_allocation.uncertainty import solve_uncertain_allocation
+
+convoys, escorts, limit = build_demo_scenario()
+scenarios = build_uncertain_demo_scenarios()
+
+result = solve_uncertain_allocation(
+    convoys,
+    escorts,
+    scenarios,
+    limit,
+    risk_aversion=0.5,
+)
+
+print(result.expected_survivors)
+print(result.worst_case_survivors)
+```
+
 ## Run the test suite
 
 ```bash
@@ -116,7 +187,7 @@ python -m pytest
 
 The test suite verifies, among other properties:
 
-- objective/reporting consistency,
+- deterministic objective/reporting consistency,
 - escort exclusivity,
 - survival-probability bounds,
 - convoy minimum and maximum assignment limits,
@@ -124,27 +195,34 @@ The test suite verifies, among other properties:
 - diminishing marginal benefit across slots,
 - rejection of infeasible aggregate minimum requirements,
 - rejection of non-finite numeric inputs,
-- correct baseline behavior when no escort resources are available.
+- correct baseline behavior when no escort resources are available,
+- stochastic objective consistency with probability-weighted outcomes,
+- robust objective consistency with the worst supplied scenario,
+- equivalence between the deterministic model and a one-scenario nominal uncertainty model,
+- uncertainty-model escort exclusivity,
+- rejection of invalid scenario probability distributions and incomplete scenario definitions.
 
 GitHub Actions runs the test suite on Python 3.10, 3.11, and 3.12 for pushes and pull requests targeting `main`.
 
 ## Model scope and interpretation
 
-This repository is an educational operations-research example. It is not a historical reconstruction, tactical tool, empirical survival model, or validated operational decision system.
+This repository is an educational operations-research example. It is not a historical reconstruction, tactical tool, empirical survival model, forecast, or validated operational decision system.
 
-The protection scores, threat scores, survival probabilities, scale parameter, and diminishing-return factors are synthetic assumptions. The model is mathematically consistent with those assumptions, but the resulting probabilities should not be interpreted as estimates for any real-world operation.
+The protection scores, threat scores, survival probabilities, scenario probabilities, threat multipliers, scale parameter, and diminishing-return factors are synthetic assumptions. The optimization is mathematically conditional on those assumptions, but the numerical outputs should not be interpreted as estimates for any real-world operation.
 
 ## Design limitations
 
-The model is intentionally compact. It does not currently model:
+The current models do not include:
 
 - travel time or multi-period escort scheduling,
 - escort endurance or refueling,
 - route compatibility,
-- uncertain threat scenarios,
-- correlated losses,
+- correlated loss processes,
 - convoy splitting or merging,
-- dynamic reallocation,
+- dynamic reallocation after scenario observation,
+- recourse decisions,
+- distributionally robust ambiguity sets,
+- CVaR or other tail-risk measures,
 - empirically calibrated nonlinear survival functions.
 
 These are natural extensions for more advanced operations-research work.

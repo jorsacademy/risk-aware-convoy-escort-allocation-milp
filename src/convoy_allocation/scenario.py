@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .model import Convoy, Escort
+from .uncertainty import ThreatScenario
 
 
 def build_demo_scenario() -> tuple[dict[str, Convoy], dict[str, Escort], int]:
@@ -28,3 +29,39 @@ def build_demo_scenario() -> tuple[dict[str, Convoy], dict[str, Escort], int]:
 
     max_available_escorts = 8
     return convoys, escorts, max_available_escorts
+
+
+def build_uncertain_demo_scenarios() -> dict[str, ThreatScenario]:
+    """Return a finite synthetic threat distribution for stochastic experiments."""
+    return {
+        "Low": ThreatScenario(
+            probability=0.25,
+            threat_multipliers={
+                "Convoy-A": 0.82,
+                "Convoy-B": 0.88,
+                "Convoy-C": 0.86,
+                "Convoy-D": 0.90,
+                "Convoy-E": 0.84,
+            },
+        ),
+        "Nominal": ThreatScenario(
+            probability=0.50,
+            threat_multipliers={
+                "Convoy-A": 1.00,
+                "Convoy-B": 1.00,
+                "Convoy-C": 1.00,
+                "Convoy-D": 1.00,
+                "Convoy-E": 1.00,
+            },
+        ),
+        "High": ThreatScenario(
+            probability=0.25,
+            threat_multipliers={
+                "Convoy-A": 1.28,
+                "Convoy-B": 1.18,
+                "Convoy-C": 1.34,
+                "Convoy-D": 1.22,
+                "Convoy-E": 1.30,
+            },
+        ),
+    }
