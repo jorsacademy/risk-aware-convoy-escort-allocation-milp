@@ -103,7 +103,7 @@ def _validate_inputs(
     minimum_required = 0
 
     for convoy_id, convoy in convoys.items():
-        if not convoy_id:
+        if not isinstance(convoy_id, str) or not convoy_id:
             raise ValueError("Convoy identifiers must be non-empty strings.")
         if not isinstance(convoy.ships, int) or isinstance(convoy.ships, bool):
             raise TypeError(f"Convoy {convoy_id} ships must be an integer.")
@@ -139,7 +139,7 @@ def _validate_inputs(
         )
 
     for escort_id, escort in escorts.items():
-        if not escort_id:
+        if not isinstance(escort_id, str) or not escort_id:
             raise ValueError("Escort identifiers must be non-empty strings.")
         if not _is_finite(escort.protection) or escort.protection <= 0:
             raise ValueError(f"Escort {escort_id} protection must be finite and positive.")
@@ -195,20 +195,24 @@ def solve_allocation(
 
     convoy_ids = tuple(convoys)
     escort_ids = tuple(escorts)
+    convoy_index = {convoy_id: index for index, convoy_id in enumerate(convoy_ids)}
+    escort_index = {escort_id: index for index, escort_id in enumerate(escort_ids)}
     max_slots = min(max_available_escorts, len(diminishing_returns), len(escort_ids))
 
     model = LpProblem("Risk_Aware_Convoy_Escort_Allocation", LpMaximize)
 
     x = {
         (convoy_id, escort_id): LpVariable(
-            f"assign_{convoy_id}_{escort_id}", cat=LpBinary
+            f"assign_c{convoy_index[convoy_id]}_e{escort_index[escort_id]}",
+            cat=LpBinary,
         )
         for convoy_id in convoy_ids
         for escort_id in escort_ids
     }
     z = {
         (convoy_id, escort_id, slot): LpVariable(
-            f"slot_{convoy_id}_{escort_id}_{slot}", cat=LpBinary
+            f"slot_c{convoy_index[convoy_id]}_e{escort_index[escort_id]}_k{slot}",
+            cat=LpBinary,
         )
         for convoy_id in convoy_ids
         for escort_id in escort_ids
@@ -216,7 +220,7 @@ def solve_allocation(
     }
     slot_used = {
         (convoy_id, slot): LpVariable(
-            f"slot_used_{convoy_id}_{slot}", cat=LpBinary
+            f"slot_used_c{convoy_index[convoy_id]}_k{slot}", cat=LpBinary
         )
         for convoy_id in convoy_ids
         for slot in range(max_slots)
