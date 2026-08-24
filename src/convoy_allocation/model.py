@@ -12,7 +12,6 @@ from pulp import (
     LpVariable,
     PULP_CBC_CMD,
     lpSum,
-    value,
 )
 
 
@@ -332,9 +331,10 @@ def solve_allocation(
             )
         )
 
-    objective_value = float(value(model.objective))
+    convoy_results_tuple = tuple(convoy_results)
+    objective_value = sum(item.expected_survivors for item in convoy_results_tuple)
     return AllocationResult(
         status=status,
         objective_value=objective_value,
-        convoys=tuple(convoy_results),
+        convoys=convoy_results_tuple,
     )
