@@ -51,6 +51,28 @@ class UncertainAllocationResult:
         return min(item.expected_survivors for item in self.scenarios)
 
 
+@dataclass(frozen=True)
+class CVaRAllocationResult:
+    status: str
+    objective_value: float
+    cvar_alpha: float
+    cvar_weight: float
+    assigned_escorts: Mapping[str, tuple[str, ...]]
+    scenarios: tuple[ScenarioOutcome, ...]
+
+    @property
+    def expected_survivors(self) -> float:
+        return sum(item.probability * item.expected_survivors for item in self.scenarios)
+
+    @property
+    def worst_case_survivors(self) -> float:
+        return min(item.expected_survivors for item in self.scenarios)
+
+    @property
+    def cvar_survivors(self) -> float:
+        return _lower_tail_cvar(self.scenarios, self.cvar_alpha)
+
+
 _EPS = 1e-9
 
 
@@ -138,43 +160,28 @@ def _validate_uncertain_inputs(
             raise ValueError(f"Escort {escort_id} protection must be finite and positive.")
 
 
-def solve_uncertain_allocation(
+def _validate_cvar_parameters(cvar_alpha: float, cvar_weight: float) -> None:
+    if not _finite(cvar_alpha) or not 0 <= cvar_alpha < 1:
+        raise ValueError("cvar_alpha must be in [0, 1).")
+    if not _finite(cvar_weight) or not 0 <= cvar_weight <= 1:
+        raise ValueError("cvar_weight must be in [0, 1].")
+
+
+def _build_uncertain_core(
     convoys: Mapping[str, Convoy],
     escorts: Mapping[str, Escort],
     scenarios: Mapping[str, ThreatScenario],
     max_available_escorts: int,
-    *,
-    diminishing_returns: Sequence[float] = (1.0, 0.72, 0.52, 0.38, 0.28, 0.20),
-    effectiveness_scale: float = 0.9,
-    risk_aversion: float = 0.0,
-) -> UncertainAllocationResult:
-    """Solve a scenario-based allocation MILP under threat uncertainty.
-
-    Assignment decisions are first-stage decisions shared by all scenarios.
-    Scenario-dependent threat multipliers change the survival gain associated
-    with each escort-slot pair. The objective is a convex combination of
-    probability-weighted expected survivors and worst-case survivors.
-
-    risk_aversion = 0.0 gives a risk-neutral stochastic program.
-    risk_aversion = 1.0 gives a maximin robust allocation over the supplied
-    finite scenario set.
-    """
-    _validate_uncertain_inputs(
-        convoys,
-        escorts,
-        scenarios,
-        max_available_escorts,
-        diminishing_returns,
-        effectiveness_scale,
-        risk_aversion,
-    )
-
+    diminishing_returns: Sequence[float],
+    effectiveness_scale: float,
+    model_name: str,
+):
     convoy_ids = tuple(convoys)
     escort_ids = tuple(escorts)
     scenario_ids = tuple(scenarios)
     max_slots = min(max_available_escorts, len(diminishing_returns), len(escort_ids))
 
-    model = LpProblem("Uncertain_Convoy_Escort_Allocation", LpMaximize)
+    model = LpProblem(model_name, LpMaximize)
 
     x = {
         (c, e): LpVariable(f"assign_{i}_{j}", cat=LpBinary)
@@ -210,24 +217,17 @@ def solve_uncertain_allocation(
                     )
                     gain[s, c, e, k] = min(raw, remaining)
 
-    scenario_totals = {}
-    for s in scenario_ids:
-        baseline = sum(convoys[c].ships * convoys[c].baseline_survival for c in convoy_ids)
-        scenario_totals[s] = baseline + lpSum(
+    baseline = sum(convoys[c].ships * convoys[c].baseline_survival for c in convoy_ids)
+    scenario_totals = {
+        s: baseline
+        + lpSum(
             convoys[c].ships * gain[s, c, e, k] * z[c, e, k]
             for c in convoy_ids
             for e in escort_ids
             for k in range(max_slots)
         )
-
-    worst_case = LpVariable("worst_case_expected_survivors", lowBound=0)
-    expected_total = lpSum(
-        scenarios[s].probability * scenario_totals[s] for s in scenario_ids
-    )
-    model += (1.0 - risk_aversion) * expected_total + risk_aversion * worst_case
-
-    for s in scenario_ids:
-        model += worst_case <= scenario_totals[s]
+        for s in scenario_ids
+    }
 
     for e in escort_ids:
         model += lpSum(x[c, e] for c in convoy_ids) <= 1
@@ -256,6 +256,99 @@ def solve_uncertain_allocation(
                 for k in range(max_slots)
             ) <= 1.0 - convoy.baseline_survival
 
+    return model, x, scenario_totals, convoy_ids, escort_ids, scenario_ids
+
+
+def _extract_outcomes(
+    convoys: Mapping[str, Convoy],
+    scenarios: Mapping[str, ThreatScenario],
+    scenario_totals,
+    scenario_ids: Sequence[str],
+) -> tuple[ScenarioOutcome, ...]:
+    total_ships = sum(convoy.ships for convoy in convoys.values())
+    return tuple(
+        ScenarioOutcome(
+            scenario_id=s,
+            probability=scenarios[s].probability,
+            expected_survivors=float(value(scenario_totals[s])),
+            survival_rate=float(value(scenario_totals[s])) / total_ships,
+        )
+        for s in scenario_ids
+    )
+
+
+def _lower_tail_cvar(outcomes: Sequence[ScenarioOutcome], alpha: float) -> float:
+    """Return lower-tail CVaR for a discrete survivor distribution.
+
+    The tail mass is 1 - alpha. Outcomes are accumulated from the smallest
+    survivor count upward, allowing the final scenario probability to be used
+    fractionally when it crosses the tail-mass boundary.
+    """
+    tail_mass = 1.0 - alpha
+    remaining = tail_mass
+    weighted_sum = 0.0
+
+    for outcome in sorted(outcomes, key=lambda item: item.expected_survivors):
+        if remaining <= _EPS:
+            break
+        mass = min(outcome.probability, remaining)
+        weighted_sum += mass * outcome.expected_survivors
+        remaining -= mass
+
+    if remaining > 1e-7:
+        raise RuntimeError("Scenario probabilities do not cover the requested CVaR tail.")
+    return weighted_sum / tail_mass
+
+
+def solve_uncertain_allocation(
+    convoys: Mapping[str, Convoy],
+    escorts: Mapping[str, Escort],
+    scenarios: Mapping[str, ThreatScenario],
+    max_available_escorts: int,
+    *,
+    diminishing_returns: Sequence[float] = (1.0, 0.72, 0.52, 0.38, 0.28, 0.20),
+    effectiveness_scale: float = 0.9,
+    risk_aversion: float = 0.0,
+) -> UncertainAllocationResult:
+    """Solve a scenario-based allocation MILP under threat uncertainty.
+
+    Assignment decisions are first-stage decisions shared by all scenarios.
+    The objective is a convex combination of probability-weighted expected
+    survivors and worst-case survivors.
+
+    risk_aversion = 0.0 gives a risk-neutral stochastic program.
+    risk_aversion = 1.0 gives a maximin robust allocation over the supplied
+    finite scenario set.
+    """
+    _validate_uncertain_inputs(
+        convoys,
+        escorts,
+        scenarios,
+        max_available_escorts,
+        diminishing_returns,
+        effectiveness_scale,
+        risk_aversion,
+    )
+
+    model, x, scenario_totals, convoy_ids, escort_ids, scenario_ids = _build_uncertain_core(
+        convoys,
+        escorts,
+        scenarios,
+        max_available_escorts,
+        diminishing_returns,
+        effectiveness_scale,
+        "Uncertain_Convoy_Escort_Allocation",
+    )
+
+    worst_case = LpVariable("worst_case_expected_survivors", lowBound=0)
+    expected_total = lpSum(
+        scenarios[s].probability * scenario_totals[s] for s in scenario_ids
+    )
+    model += (1.0 - risk_aversion) * expected_total + risk_aversion * worst_case
+
+    for s in scenario_ids:
+        model += worst_case <= scenario_totals[s]
+
     model.solve(PULP_CBC_CMD(msg=False))
     status = LpStatus[model.status]
     if status != "Optimal":
@@ -265,24 +358,90 @@ def solve_uncertain_allocation(
         c: tuple(e for e in escort_ids if (x[c, e].value() or 0.0) > 0.5)
         for c in convoy_ids
     }
-
-    total_ships = sum(convoys[c].ships for c in convoy_ids)
-    outcomes = []
-    for s in scenario_ids:
-        realized = float(value(scenario_totals[s]))
-        outcomes.append(
-            ScenarioOutcome(
-                scenario_id=s,
-                probability=scenarios[s].probability,
-                expected_survivors=realized,
-                survival_rate=realized / total_ships,
-            )
-        )
+    outcomes = _extract_outcomes(convoys, scenarios, scenario_totals, scenario_ids)
 
     return UncertainAllocationResult(
         status=status,
         objective_value=float(value(model.objective)),
         risk_aversion=risk_aversion,
         assigned_escorts=assigned,
-        scenarios=tuple(outcomes),
+        scenarios=outcomes,
+    )
+
+
+def solve_cvar_allocation(
+    convoys: Mapping[str, Convoy],
+    escorts: Mapping[str, Escort],
+    scenarios: Mapping[str, ThreatScenario],
+    max_available_escorts: int,
+    *,
+    diminishing_returns: Sequence[float] = (1.0, 0.72, 0.52, 0.38, 0.28, 0.20),
+    effectiveness_scale: float = 0.9,
+    cvar_alpha: float = 0.90,
+    cvar_weight: float = 1.0,
+) -> CVaRAllocationResult:
+    """Solve a lower-tail CVaR-aware allocation MILP.
+
+    CVaR is applied to the distribution of scenario survivor totals. Because
+    larger survivor totals are preferred, this formulation maximizes the mean
+    of the worst 1 - cvar_alpha probability mass. cvar_weight controls the
+    trade-off between probability-weighted expected survivors and lower-tail
+    CVaR. A weight of zero is risk-neutral; a weight of one is pure CVaR.
+    """
+    _validate_uncertain_inputs(
+        convoys,
+        escorts,
+        scenarios,
+        max_available_escorts,
+        diminishing_returns,
+        effectiveness_scale,
+        risk_aversion=0.0,
+    )
+    _validate_cvar_parameters(cvar_alpha, cvar_weight)
+
+    model, x, scenario_totals, convoy_ids, escort_ids, scenario_ids = _build_uncertain_core(
+        convoys,
+        escorts,
+        scenarios,
+        max_available_escorts,
+        diminishing_returns,
+        effectiveness_scale,
+        "CVaR_Convoy_Escort_Allocation",
+    )
+
+    expected_total = lpSum(
+        scenarios[s].probability * scenario_totals[s] for s in scenario_ids
+    )
+
+    eta = LpVariable("cvar_tail_threshold", lowBound=0)
+    shortfall = {
+        s: LpVariable(f"cvar_shortfall_{i}", lowBound=0)
+        for i, s in enumerate(scenario_ids)
+    }
+    for s in scenario_ids:
+        model += shortfall[s] >= eta - scenario_totals[s]
+
+    cvar_expr = eta - (1.0 / (1.0 - cvar_alpha)) * lpSum(
+        scenarios[s].probability * shortfall[s] for s in scenario_ids
+    )
+    model += (1.0 - cvar_weight) * expected_total + cvar_weight * cvar_expr
+
+    model.solve(PULP_CBC_CMD(msg=False))
+    status = LpStatus[model.status]
+    if status != "Optimal":
+        raise RuntimeError(f"Solver did not return an optimal solution: {status}")
+
+    assigned = {
+        c: tuple(e for e in escort_ids if (x[c, e].value() or 0.0) > 0.5)
+        for c in convoy_ids
+    }
+    outcomes = _extract_outcomes(convoys, scenarios, scenario_totals, scenario_ids)
+
+    return CVaRAllocationResult(
+        status=status,
+        objective_value=float(value(model.objective)),
+        cvar_alpha=cvar_alpha,
+        cvar_weight=cvar_weight,
+        assigned_escorts=assigned,
+        scenarios=outcomes,
     )
